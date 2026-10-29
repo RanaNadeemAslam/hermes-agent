@@ -236,7 +236,7 @@ def _profile_create(args):
         if honcho_cli is not None:
             try:
                 from hermes_cli.profiles_creation_defaults import creation_resets_identity
-                if not creation_resets_identity() and honcho_cli.clone_honcho_for_profile(name):
+                if not creation_resets_identity(profile_dir) and honcho_cli.clone_honcho_for_profile(name):
                     print(f"Honcho config cloned (peer: {name})")
             except honcho_cli.ConfigWriteRefused as e:
                 print(f"Honcho config not cloned: {e}")

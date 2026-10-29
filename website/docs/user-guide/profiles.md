@@ -214,13 +214,25 @@ rejected. Source and target paths must be relative without traversal. Write `con
 through the manifest's `config` mapping, never a resource. File permissions are restricted
 to the owner, retaining executable bits.
 
-Only resources with `render: true` substitute the exact literal `{{profile_name}}` with the
-canonical final name (for example `Scout` becomes `scout`). Unknown `{{...}}` substitutions
-fail creation; there is no evaluation. The config overlay itself is not rendered. For example,
-a provider-specific file can use this name in a private write-bank identifier while retaining
-a fixed shared recall bank. The provider defines that file's schema and bank access rules.
-Two differently named profiles get different identifiers; deleting and reusing a name reuses
-the rendered identifier, so the operator must manage that provider's bank lifecycle.
+Only resources with `render: true` substitute these exact literals:
+
+- `{{profile_name}}`: the canonical final name (for example `Scout` becomes `scout`).
+- `{{profile_id}}`: a fresh UUID4 for this creation, shared across all rendered resources.
+
+Unknown `{{...}}` substitutions fail creation; there is no evaluation. The config overlay
+itself is not rendered. Use `profile-{{profile_id}}` in a provider-specific private write-bank
+identifier, with a fixed shared recall bank. Reusing a deleted profile name then gets a new
+private bank. Name-only identifiers remain supported but do not provide this isolation.
+The provider defines that file's schema and bank access rules.
+
+Before publication, Hermes persists `.profile-creation.json` with `profile_id`, `policy_applied`,
+`template` and `reset_identity`. The marker is Hermes-owned and cannot be a template resource.
+Every new creation, including a clone with defaults disabled, gets its own marker; a clone
+never inherits its source's creation ID or applied-policy decision. Disabled cloning otherwise
+preserves ordinary settings and data. Rename and later starts retain the marker and already
+rendered files; they do not generate another UUID or rerender the template. The CLI/TUI
+post-create guards use this receipt, so changing operator policy after publication cannot
+undo the applied privacy reset. Existing profiles without a marker keep their legacy behavior.
 
 The config overlay recursively merges mappings and replaces lists/scalars. The caller's
 selected model and selected endpoint take precedence over template model defaults. Explicit

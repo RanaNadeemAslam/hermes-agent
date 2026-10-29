@@ -553,7 +553,7 @@ def _mirror_launch_credentials(path, params: dict) -> dict:
     mirrored = {"env": False, "auth": "shared" if share_auth else False, "model_inherited": False,
                 "voice": False}
     from hermes_cli.profiles_creation_defaults import creation_resets_identity
-    if not is_truthy_value(params.get("mirror_credentials", True)) or creation_resets_identity():
+    if not is_truthy_value(params.get("mirror_credentials", True)) or creation_resets_identity(path):
         return mirrored
     launch_home = get_hermes_home()
     # .env: only over the seeded comment-only stub (never a clone's secrets).

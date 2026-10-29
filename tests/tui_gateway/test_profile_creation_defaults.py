@@ -1,18 +1,25 @@
 """Desktop/TUI creation uses operator defaults without reintroducing launch credentials."""
 from pathlib import Path
 
+import pytest
+
 from hermes_cli import profiles
 from hermes_cli.config import atomic_config_replace, read_user_config_raw
 from tui_gateway import server
 
 
-def test_tui_creation_does_not_mirror_credentials_over_operator_reset(tmp_path, monkeypatch):
+@pytest.mark.parametrize("disable_after_publish", [False, True])
+def test_tui_creation_does_not_mirror_credentials_over_operator_reset(tmp_path, monkeypatch, disable_after_publish):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     def notified(name):
         assert (home / "profiles" / name / "SOUL.md").read_text() == "caller role"
+        if disable_after_publish:
+            cfg = read_user_config_raw(home / "config.yaml")
+            cfg["profile_creation"]["enabled"] = False
+            atomic_config_replace(home / "config.yaml", cfg)
     monkeypatch.setattr(profiles, "_notify_multiplexer", notified)
     monkeypatch.setattr(profiles, "_maybe_register_gateway_service", lambda name: None)
     monkeypatch.setattr(profiles, "seed_profile_skills", lambda *a, **kw: None)

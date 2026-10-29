@@ -1,9 +1,13 @@
 """Trusted operator templates for new profiles, applied only in hidden staging trees."""
+import json
 from pathlib import Path
+from uuid import uuid4
 import shutil
 import stat
 
 import hermes_yaml as yaml
+
+CREATION_MARKER = ".profile-creation.json"
 
 
 def load_creation_policy() -> dict | None:
@@ -33,10 +37,30 @@ def load_creation_policy() -> dict | None:
     return {**policy, "template": template}
 
 
-def creation_resets_identity() -> bool:
-    """Surface-specific post-create copying must not undo the operator's fresh identity policy."""
-    policy = load_creation_policy()
-    return bool(policy and policy.get("reset_clone", False))
+def creation_resets_identity(profile_dir: Path) -> bool:
+    """Read the applied decision, independent of operator policy changes after publication."""
+    try:
+        receipt = json.loads((profile_dir / CREATION_MARKER).read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return False  # Legacy profiles have no creation policy receipt.
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("reset_identity"), bool):
+        raise ValueError("Invalid profile creation receipt")
+    return receipt["reset_identity"]
+
+
+def _write_creation_receipt(staging: Path, policy: dict | None, profile_id: str) -> None:
+    from utils import atomic_json_write
+
+    marker = staging / CREATION_MARKER
+    # A full clone may carry the source receipt, even a link. Replace the entry itself:
+    # atomic_json_write otherwise preserves symlink destinations for ordinary user files.
+    marker.unlink(missing_ok=True)
+    atomic_json_write(marker, {
+        "profile_id": profile_id,
+        "policy_applied": policy is not None,
+        "template": str(policy["template"]) if policy else None,
+        "reset_identity": bool(policy and policy.get("reset_clone", False)),
+    }, mode=0o600)
 
 
 def _relative_path(value) -> Path:
@@ -64,30 +88,30 @@ def _checked_path(root: Path, relative: Path) -> Path:
     return current
 
 
-def _render(text: str, name: str) -> str:
-    rendered = text.replace("{{profile_name}}", name)
+def _render(text: str, name: str, profile_id: str) -> str:
+    rendered = text.replace("{{profile_name}}", name).replace("{{profile_id}}", profile_id)
     if "{{" in rendered or "}}" in rendered:
-        raise ValueError("Unknown template variable; only {{profile_name}} is supported")
+        raise ValueError("Unknown template variable; only {{profile_name}} and {{profile_id}} are supported")
     return rendered
 
 
 def _copy_resource(source_root: Path, source_rel: Path, staging: Path, target_rel: Path,
-                   *, render: bool, name: str) -> None:
+                   *, render: bool, name: str, profile_id: str) -> None:
     source = _checked_path(source_root, source_rel)
     target = _checked_path(staging, target_rel)
-    if target_rel.parts[0].casefold() == "config.yaml":
-        raise ValueError("Use the manifest config mapping to write config.yaml")
+    if target_rel.parts[0].casefold() in {"config.yaml", CREATION_MARKER}:
+        raise ValueError("Use the config mapping for config.yaml; the creation marker is Hermes-owned")
     if source.is_dir():
         target.mkdir(parents=True, exist_ok=True, mode=0o700)
         for child in sorted(source.iterdir()):
             _copy_resource(source_root, source_rel / child.name, staging, target_rel / child.name,
-                           render=render, name=name)
+                           render=render, name=name, profile_id=profile_id)
         return
     if not source.is_file():
         raise FileNotFoundError(f"Template resource missing or not a regular file: {source_rel}")
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if render:
-        text = _render(source.read_text(encoding="utf-8-sig"), name)
+        text = _render(source.read_text(encoding="utf-8-sig"), name, profile_id)
         target.write_text(text, encoding="utf-8")
     else:
         shutil.copyfile(source, target)
@@ -109,7 +133,7 @@ def _read_manifest(template: Path) -> dict:
     return manifest
 
 
-def _apply_template(staging: Path, policy: dict, *, name: str, no_skills: bool) -> None:
+def _apply_template(staging: Path, policy: dict, *, name: str, profile_id: str, no_skills: bool) -> None:
     from hermes_cli.config import _deep_merge, atomic_config_replace, read_user_config_raw
     from hermes_cli.profile_model_seed import launch_model_seed, merge_endpoint_seed
 
@@ -136,7 +160,7 @@ def _apply_template(staging: Path, policy: dict, *, name: str, no_skills: bool) 
             raise ValueError("Template resource render must be boolean")
         if no_skills and target.parts[0] == "skills":
             continue
-        _copy_resource(template, source, staging, target, render=render, name=name)
+        _copy_resource(template, source, staging, target, render=render, name=name, profile_id=profile_id)
 
 
 def _prepare_layout(staging: Path, source_dir: Path | None, *, name: str,
@@ -170,6 +194,7 @@ def initialize_profile_staging(staging: Path, source_dir: Path | None, *, name: 
     )
 
     policy = load_creation_policy()
+    profile_id = str(uuid4())
     reset = bool(policy and policy.get("reset_clone", False) and source_dir is not None)
     model_source = source_dir or get_hermes_home()
     # Model resolution may consult config and maintain a last-good backup. Enabled creation
@@ -182,9 +207,10 @@ def initialize_profile_staging(staging: Path, source_dir: Path | None, *, name: 
             if reset or source_dir is None:
                 atomic_config_replace(staging / "config.yaml",
                                       launch_model_seed(read_user_config_raw(model_source / "config.yaml")))
-            _apply_template(staging, policy, name=name, no_skills=no_skills)
+            _apply_template(staging, policy, name=name, profile_id=profile_id, no_skills=no_skills)
         finish_profile_layout(staging, no_skills=no_skills, clone_all=clone_all,
                               description=description, soul=soul)
+        _write_creation_receipt(staging, policy, profile_id)
     finally:
         if token is not None:
             reset_hermes_home_override(token)

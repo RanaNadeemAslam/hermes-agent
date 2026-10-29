@@ -142,6 +142,7 @@ def test_no_skills_is_explicit_opt_out(operator):
     ("../escape", "{}", False),
     ("config.yaml", "{}", False),
     ("CONFIG.YAML", "{}", False),
+    (".profile-creation.json", "{}", False),
     ("example/config.json", "{{unknown}}", False),
     ("example/config.json", "{}", True),
 ])
@@ -263,7 +264,8 @@ async def test_rest_creation_applies_template_and_explicit_identity(operator, mo
     assert "REST project" in (path / "profile.yaml").read_text()
 
 
-def test_cli_reset_skips_legacy_provider_clone(operator, monkeypatch):
+@pytest.mark.parametrize("disable_after_publish", [False, True])
+def test_cli_reset_skips_legacy_provider_clone(operator, monkeypatch, disable_after_publish):
     from types import SimpleNamespace
     from hermes_cli.profile_cmd import _profile_create
     import plugins.memory
@@ -272,6 +274,111 @@ def test_cli_reset_skips_legacy_provider_clone(operator, monkeypatch):
     provider_cli = SimpleNamespace(ConfigWriteRefused=ValueError,
                                    clone_honcho_for_profile=lambda name: cloned.append(name))
     monkeypatch.setattr(plugins.memory, "import_provider_module", lambda *a: provider_cli)
+    def notified(name):
+        if disable_after_publish:
+            cfg = config(home)
+            cfg["profile_creation"]["enabled"] = False
+            atomic_config_replace(home / "config.yaml", cfg)
+    monkeypatch.setattr(profiles, "_notify_multiplexer", notified)
     _profile_create(SimpleNamespace(profile_name="clone-cli", clone=True, no_alias=True))
     assert config(home / "profiles/clone-cli")["memory"]["provider"] == "example"
     assert not cloned
+
+
+def test_creation_uuid_changes_on_same_name_recreation_and_is_shared(operator, monkeypatch):
+    import shutil
+    from uuid import UUID
+    home, template = operator
+    (template / "bank.json").write_text(json.dumps({
+        "write_bank": "private-{{profile_id}}", "profile_name": "{{profile_name}}",
+    }))
+    (template / "identity.txt").write_text("{{profile_id}}")
+    manifest = yaml.safe_load((template / "manifest.yaml").read_text())
+    manifest["resources"].append({"source": "identity.txt", "target": "identity.txt", "render": True})
+    (template / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+    seen = []
+
+    def notified(name):
+        path = home / "profiles" / name
+        receipt = json.loads((path / ".profile-creation.json").read_text())
+        instance = receipt["profile_id"]
+        assert UUID(instance).version == 4
+        assert receipt["policy_applied"] is True
+        assert receipt["reset_identity"] is True
+        assert receipt["template"] == str(template)
+        assert (path / "identity.txt").read_text() == instance
+        assert json.loads((path / "example/config.json").read_text()) == {
+            "write_bank": f"private-{instance}", "profile_name": "repeat",
+        }
+        seen.append(instance)
+
+    monkeypatch.setattr(profiles, "_notify_multiplexer", notified)
+    first = profiles.create_profile("Repeat", no_alias=True)
+    shutil.rmtree(first)
+    profiles.create_profile("Repeat", no_alias=True)
+    assert len(seen) == 2 and seen[0] != seen[1]
+
+
+def test_disabled_clone_gets_own_receipt_without_inheriting_reset(operator):
+    from hermes_cli.profiles_creation_defaults import creation_resets_identity
+    home, _ = operator
+    source = profiles.create_profile("source", no_alias=True)
+    source_receipt = (source / ".profile-creation.json").read_bytes()
+    (source / "SOUL.md").write_text("source role")
+    (source / ".env").write_text("TOOL_API_KEY=fake-source-key\n")
+    cfg = config(home)
+    cfg["profile_creation"]["enabled"] = False
+    atomic_config_replace(home / "config.yaml", cfg)
+    path = profiles.create_profile("copy", clone_from="source", clone_all=True, no_alias=True)
+    receipt = json.loads((path / ".profile-creation.json").read_text())
+    assert receipt["profile_id"] != json.loads(source_receipt)["profile_id"]
+    assert receipt["policy_applied"] is False
+    assert receipt["reset_identity"] is False
+    assert not creation_resets_identity(path)
+    assert creation_resets_identity(source)
+    assert (source / ".profile-creation.json").read_bytes() == source_receipt
+    assert (path / "SOUL.md").read_text() == "source role"
+    assert "fake-source-key" in (path / ".env").read_text()
+
+
+def test_creation_identity_survives_rename_and_later_load(operator, monkeypatch):
+    from hermes_cli import profile_identity, profiles_honcho
+    from hermes_cli.config_effective import load_user_config_effective
+    from hermes_cli.profiles_creation_defaults import creation_resets_identity
+    _, template = operator
+    (template / "bank.json").write_text('{"write_bank": "private-{{profile_id}}"}')
+    source = profiles.create_profile("original", no_alias=True)
+    receipt = (source / ".profile-creation.json").read_bytes()
+    bank = (source / "example/config.json").read_bytes()
+    monkeypatch.setattr(profiles, "_check_gateway_running", lambda *a: False)
+    monkeypatch.setattr(profiles, "_cleanup_gateway_service", lambda *a: False)
+    monkeypatch.setattr(profiles, "_maybe_unregister_gateway_service", lambda *a: None)
+    monkeypatch.setattr(profiles, "_stop_bot_desktop", lambda *a: None)
+    monkeypatch.setattr(profiles, "_live_default_multiplexer", lambda: False)
+    monkeypatch.setattr(profiles, "check_alias_collision", lambda *a: "skip test alias")
+    monkeypatch.setattr(profile_identity, "_migrate_profile_identity", lambda *a: None)
+    monkeypatch.setattr(profiles_honcho, "migrate_honcho_profile_host", lambda *a: None)
+    renamed = profiles.rename_profile("original", "renamed")
+    assert load_user_config_effective(renamed / "config.yaml")["memory"]["provider"] == "example"
+    assert creation_resets_identity(renamed)
+    assert (renamed / ".profile-creation.json").read_bytes() == receipt
+    assert (renamed / "example/config.json").read_bytes() == bank
+
+
+def test_disabled_clone_replaces_receipt_link_without_writing_outside(operator):
+    home, _ = operator
+    source = profiles.create_profile("source", no_alias=True)
+    marker = source / ".profile-creation.json"
+    outside = home.parent / "outside-receipt.json"
+    outside.write_bytes(marker.read_bytes())
+    original = outside.read_bytes()
+    marker.unlink()
+    marker.symlink_to(outside)
+    cfg = config(home)
+    cfg["profile_creation"]["enabled"] = False
+    atomic_config_replace(home / "config.yaml", cfg)
+    cloned = profiles.create_profile("copy", clone_from="source", clone_all=True, no_alias=True)
+    assert outside.read_bytes() == original
+    assert marker.is_symlink()
+    assert not (cloned / ".profile-creation.json").is_symlink()
+    assert json.loads((cloned / ".profile-creation.json").read_text())["profile_id"] != json.loads(original)["profile_id"]
