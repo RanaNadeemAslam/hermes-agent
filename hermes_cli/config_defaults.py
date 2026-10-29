@@ -34,12 +34,12 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
-    # min_switch_reset_seconds: opt-in (0 = off). When a rate-limited primary declares a reset
-    # sooner than this many seconds, stay on it (the retry backoff rides out the window) instead
-    # of switching the turn to a fallback model.
+    # min_switch_reset_seconds: opt-in (0 = off). Wait for a rate-limited primary whose reset
+    # is sooner than this threshold instead of switching to a fallback model.
     "fallback": {"min_switch_reset_seconds": 0},
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    "profile_creation": {"enabled": False, "template": "", "reset_clone": False},
     # journal_mode: SQLite journal mode for every Hermes DB. "wal" default; use "delete" on
     # weak-fsync/shared filesystems where WAL is not crash-safe (macOS virtiofs, NFS, SMB).
     "database": {

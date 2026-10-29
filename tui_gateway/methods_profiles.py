@@ -313,6 +313,8 @@ def _(rid, params: dict) -> dict:
     name = str(params.get("name") or "").strip()
     if not name:
         return _err(rid, 4061, "name required")
+    soul = params.get("soul")
+    soul = soul if isinstance(soul, str) and soul.strip() else None
     try:
         from hermes_cli import profiles as profiles_mod
         clone_from = str(params.get("clone_from") or "").strip() or None
@@ -322,7 +324,7 @@ def _(rid, params: dict) -> dict:
             clone_config=bool(clone_from) and not clone_all,
             no_skills=is_truthy_value(params.get("no_skills", False)),
             description=str(params.get("description") or "").strip() or None,
-            clone_channels=is_truthy_value(params.get("clone_channels", False)))
+            clone_channels=is_truthy_value(params.get("clone_channels", False)), soul=soul)
     except (ValueError, FileExistsError, FileNotFoundError) as e:
         return _err(rid, 4062, str(e))
     except Exception as e:
@@ -332,9 +334,7 @@ def _(rid, params: dict) -> dict:
         _best_effort(lambda: profiles_mod.seed_profile_skills(path, quiet=True))
     if not is_truthy_value(params.get("no_alias", False)):
         _best_effort(lambda: profiles_mod.check_alias_collision(name) or profiles_mod.create_wrapper_script(name))
-    soul = params.get("soul")
-    soul_written = isinstance(soul, str) and bool(soul.strip()) and _best_effort(
-        lambda: (path / "SOUL.md").write_text(soul, encoding="utf-8"))
+    soul_written = soul is not None
     mirrored = _mirror_launch_credentials(path, params)
     model, provider = _model_provider_params(params)
     model_set = False
@@ -552,7 +552,8 @@ def _mirror_launch_credentials(path, params: dict) -> dict:
     share_auth = is_truthy_value(params.get("share_auth", False))
     mirrored = {"env": False, "auth": "shared" if share_auth else False, "model_inherited": False,
                 "voice": False}
-    if not is_truthy_value(params.get("mirror_credentials", True)):
+    from hermes_cli.profiles_creation_defaults import creation_resets_identity
+    if not is_truthy_value(params.get("mirror_credentials", True)) or creation_resets_identity():
         return mirrored
     launch_home = get_hermes_home()
     # .env: only over the seeded comment-only stub (never a clone's secrets).

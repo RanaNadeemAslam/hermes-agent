@@ -1442,17 +1442,10 @@ def create_profile(
     # below has not removed yet.
     staging = _clone_staging_dir(profile_dir)
     try:
-        if clone_all and source_dir:
-            _clone_all_into(source_dir, staging, canon)
-        else:
-            _bootstrap_profile_dir(staging, source_dir, sync_imports=sync_imports)
-        if source_dir is not None and not clone_channels:
-            from hermes_cli.profile_channels import strip_channel_settings
-            stripped = strip_channel_settings(staging, include_state=clone_all, source_dir=source_dir)
-            if stripped:
-                logger.info("profile %s: cloned without messaging channels %s", canon, stripped)
-        from hermes_cli.profiles_initialization import finish_profile_layout
-        finish_profile_layout(staging, no_skills=no_skills, clone_all=clone_all, description=description, soul=soul)
+        from hermes_cli.profiles_creation_defaults import initialize_profile_staging
+        initialize_profile_staging(
+            staging, source_dir, name=canon, clone_all=clone_all, sync_imports=sync_imports,
+            clone_channels=clone_channels, no_skills=no_skills, description=description, soul=soul)
         os.rename(staging, profile_dir)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

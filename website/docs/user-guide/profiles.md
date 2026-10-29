@@ -173,6 +173,79 @@ materialized as a private copy first — the clone never writes through to the s
 When Honcho is enabled, clone operations automatically create a dedicated AI peer for the new profile while sharing the same user workspace. Each profile builds its own observations and identity. See [Honcho -- Multi-agent / Profiles](./features/memory-providers.md#honcho) for details.
 :::
 
+## Operator defaults for new profiles (opt-in)
+
+Profiles remain independent. To provision **future** profiles from an explicitly trusted
+operator template, set this in the **default operator home's** `config.yaml`:
+
+```yaml
+profile_creation:
+  enabled: true
+  template: profile-template
+  reset_clone: false
+```
+
+A relative template directory resolves from that operator home; an absolute path or `~`
+is also supported. The default is disabled. A named caller's own `profile_creation` settings
+do not override the operator's policy. Existing profiles are never changed.
+
+Create `profile-template/manifest.yaml` with a config overlay and selected resources:
+
+```yaml
+config:
+  skills:
+    create_dir: /srv/team/skills
+    external_dirs: [/srv/team/skills]
+    auto_load: [working-style, operating-policy]
+  toolsets: [skills, memory, file, terminal, session_search]
+resources:
+  - source: private-store.json
+    target: private-store/config.json
+    render: true
+  - source: provider-code
+    target: plugins/private-store
+```
+
+The template is trusted operator input, including any plugin code. Copy only the provider's
+code and required configuration, never its runtime data or credentials. Selecting a memory
+provider also requires its normal `memory.provider` setting and installed provider code.
+The resource directory may contain nested regular files; symlinks and Windows junctions are
+rejected. Source and target paths must be relative without traversal. Write `config.yaml`
+through the manifest's `config` mapping, never a resource. File permissions are restricted
+to the owner, retaining executable bits.
+
+Only resources with `render: true` substitute the exact literal `{{profile_name}}` with the
+canonical final name (for example `Scout` becomes `scout`). Unknown `{{...}}` substitutions
+fail creation; there is no evaluation. The config overlay itself is not rendered. For example,
+a provider-specific file can use this name in a private write-bank identifier while retaining
+a fixed shared recall bank. The provider defines that file's schema and bank access rules.
+Two differently named profiles get different identifiers; deleting and reusing a name reuses
+the rendered identifier, so the operator must manage that provider's bank lifecycle.
+
+The config overlay recursively merges mappings and replaces lists/scalars. The caller's
+selected model and selected endpoint take precedence over template model defaults. Explicit
+caller SOUL and description take precedence over template identity files. `--no-skills`
+also skips template `skills` settings and resources targeting `skills/`; other defaults apply.
+
+Set `reset_clone: true` only when clones should start with a **fresh identity**. Both
+`--clone` and `--clone-all` then retain only the selected model and its selected endpoint
+configuration: source SOUL, description, memory, project cwd, skills, plugins, MCP servers,
+`.env`, auth/token stores and all other source data are excluded. The template supplies the
+new profile's settings and selected resources. Source symlinks are never traversed to scrub
+state, because this mode builds fresh instead of copying and deleting. Model endpoint
+configuration can itself carry an inline API key; use secret references if it must not be
+copied. Normal root model OAuth fallback remains available.
+
+This reset also suppresses the CLI's legacy provider clone step and the TUI/Desktop's
+post-create credential/voice mirroring. It does not grant project access or MCP credentials;
+explicit caller configuration remains explicit. With reset disabled, ordinary clone semantics
+are preserved and the template overlays them; private source state may therefore remain.
+
+Application happens in the hidden staging tree, before atomic publication, through the same
+creation function used by CLI, REST and TUI/Desktop. A missing or malformed enabled template,
+invalid resource or link escape aborts creation and removes staging. Disabling the policy
+restores ordinary creation behavior; it does not roll back profiles already provisioned.
+
 ## Using profiles
 
 ### Command aliases
