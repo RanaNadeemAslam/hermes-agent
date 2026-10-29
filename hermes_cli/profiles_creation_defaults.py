@@ -158,7 +158,7 @@ def _apply_template(staging: Path, policy: dict, *, name: str, profile_id: str, 
         render = resource.get("render", False)
         if not isinstance(render, bool):
             raise ValueError("Template resource render must be boolean")
-        if no_skills and target.parts[0] == "skills":
+        if no_skills and target.parts[0].casefold() == "skills":
             continue
         _copy_resource(template, source, staging, target, render=render, name=name, profile_id=profile_id)
 

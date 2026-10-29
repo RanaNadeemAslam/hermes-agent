@@ -138,6 +138,17 @@ def test_no_skills_is_explicit_opt_out(operator):
     assert (path / "example/config.json").exists()
 
 
+def test_no_skills_rejects_case_alias_skill_resources(operator):
+    _, template = operator
+    (template / "skill").write_text("operator procedural skill")
+    manifest = yaml.safe_load((template / "manifest.yaml").read_text())
+    manifest["resources"].append({"source": "skill", "target": "Skills/team/SKILL.md"})
+    (template / "manifest.yaml").write_text(yaml.safe_dump(manifest))
+    path = profiles.create_profile("empty-case", no_skills=True, no_alias=True)
+    assert not (path / "Skills/team/SKILL.md").exists()
+    assert not config(path).get("skills", {}).get("auto_load")
+
+
 @pytest.mark.parametrize("target,content,link", [
     ("../escape", "{}", False),
     ("config.yaml", "{}", False),
