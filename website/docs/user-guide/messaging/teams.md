@@ -37,6 +37,33 @@ import the Microsoft Teams SDK:
 python -c "import pm; pm.sync_venv(['teams'], explicit=True)"
 ```
 
+## Native outbound mentions
+
+`hermes send` can tag a person through the configured bot identity; it does not use a
+human's delegated Graph account:
+
+```bash
+hermes send --to 'teams:<conversation-id>' --mention '<aad-object-id>' --file reply.txt --json
+```
+
+Repeat `--mention` for additional people. Teams values must be exact hyphenated AAD
+object IDs, not display names, emails, or phone numbers. Resolve the intended person
+in the exact conversation before composing an approved reply. The sender rechecks
+that conversation's Bot Framework member roster, uses its native member ID and display
+name, and prefixes the body with a real `<at>...</at>` mention plus matching entity.
+Missing, ambiguous, or unusable members stop the send; it never silently drops a tag.
+Names are escaped. Notification entities are attached only to the first message chunk.
+Tagged sends are text-only; attachments are rejected before posting.
+
+This capability grants no posting authority and changes no inbound mention gate.
+Approval workflows must show the intended tagged people alongside the draft before
+approval. On a timeout or a missing message ID, delivery is unknown: read the exact
+conversation before any further action, never automatically retry. Verify the app
+sender, body and structured `mentions` on exact-message Graph readback before claiming
+a real tag was delivered; use the returned `mention_message_id` for the tagged chunk,
+not merely `message_id` (which may refer to a later chunk). `message_ids` retains all
+known successful chunk IDs. A plain-text name is not evidence of a notifying mention.
+
 ## Step 1: Install the Teams CLI
 
 The `@microsoft/teams.cli` automates bot registration — no Azure portal needed.

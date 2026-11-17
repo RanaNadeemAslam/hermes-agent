@@ -210,9 +210,15 @@ def cmd_send(args: argparse.Namespace) -> None:
             "  hermes send --list      # list available targets",
             _USAGE_EXIT)
     mentions = list(getattr(args, "mentions", None) or [])
-    if mentions and target.split(":", 1)[0].strip().lower() != "whatsapp":
-        _fail("hermes send: --mention is only supported for WhatsApp targets.", _USAGE_EXIT)
-    invalid_mentions = _invalid_whatsapp_mentions(mentions)
+    platform_name = target.split(":", 1)[0].strip().lower()
+    if mentions and platform_name != "whatsapp":
+        from hermes_cli.plugins import discover_plugins
+        from gateway.platform_registry import platform_registry
+        discover_plugins()
+        entry = platform_registry.get(platform_name)
+        if entry is None or entry.standalone_send is None or not entry.standalone_send.mentions:
+            _fail("hermes send: --mention is not supported for this target.", _USAGE_EXIT)
+    invalid_mentions = _invalid_whatsapp_mentions(mentions) if platform_name == "whatsapp" else []
     if invalid_mentions:
         _fail(
             "hermes send: invalid --mention value(s): "
@@ -254,9 +260,10 @@ _SEND_ARGUMENTS = (
         "Read message body from PATH (text only). Use '-' to force stdin. "
         "To send an image/document as an attachment, use MEDIA:<path> in the message text instead."))),
     (("-s", "--subject"), dict(metavar="LINE", default=None, help="Prepend a subject/header line before the message body.")),
-    (("--mention",), dict(dest="mentions", action="append", default=None, metavar="PHONE_OR_JID", help=(
-        "WhatsApp only: add a native participant mention. Repeat for multiple recipients; "
-        "bare phone numbers are normalized to JIDs. Include each matching @<number> near the start of the message text."))),
+    (("--mention",), dict(dest="mentions", action="append", default=None, metavar="PARTICIPANT_ID", help=(
+        "Add a native participant mention (repeatable). WhatsApp: phone or JID, with matching @number in the text. "
+        "Teams: hyphenated AAD object ID; resolved against the exact room roster and prefixed as a native tag. "
+        "Teams tagged sends are text-only."))),
     (("-l", "--list"), dict(dest="list_targets", action="store_true", default=False,
                             help="List available targets. Optional positional filter: `hermes send --list telegram`.")),
     (("-q", "--quiet"), dict(action="store_true", default=False, help="Suppress stdout on success (exit code only).")),

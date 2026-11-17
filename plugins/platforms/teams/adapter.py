@@ -60,6 +60,8 @@ from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, ExecApprovalPrompt, SendResult, cache_image_from_url, cache_media_bytes_async,
     describe_proxy_error, env_proxy_for_redaction)
 from gateway.platforms.base_exec_approval import approval_timeout_seconds, format_approval_deadline_line
+from gateway.platforms.send_targets import StandaloneSendPolicy
+from plugins.platforms.teams.mentions import activity_chunks, mention_activity, mention_ids
 from agent.i18n import t
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms._shared import (
@@ -191,11 +193,16 @@ def _env_enablement() -> dict | None:
 async def _standalone_send(
     pconfig, chat_id: str, message: str, *,
     thread_id: Optional[str] = None, media_files: Optional[list] = None, force_document: bool = False,
+    mentions: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """Acquire a Bot Framework bearer token and POST a single message activity; used by
     ``send_message_tool._send_via_adapter`` when the gateway runner is not in this process
     (``hermes cron``). ``TEAMS_SERVICE_URL`` is allowlisted and ``chat_id`` charset-checked
     (SSRF/path traversal). ``media_files`` / ``force_document`` are signature parity only — text-only."""
+    try:
+        ids = mention_ids(mentions or [])
+    except ValueError as e:
+        return send_error(str(e), nothing_sent=True)
     extra = getattr(pconfig, "extra", {}) or {}
     client_id, client_secret, tenant_id = _credentials(pconfig)
     if not (client_id and client_secret and tenant_id):
@@ -214,6 +221,19 @@ async def _standalone_send(
             return send_error(f"Teams standalone send: {error}", nothing_sent=True)
     token_url, token_form = _bf_token_request(tenant_id, client_id, client_secret)
     activities_url = f"{service_url}v3/conversations/{chat_id}/activities"
+    activity_started = False
+    sent_any = False
+    sent_ids = []
+
+    def activity_error(error, *, nothing_sent=False):
+        result = send_error(error, nothing_sent=nothing_sent)
+        if sent_ids:
+            result.update(partial=True, message_id=sent_ids[0], message_ids=list(sent_ids))
+            if ids:
+                result["mention_message_id"] = sent_ids[0]
+            result["error"] = "Teams reply partly delivered; do not retry: " + result["error"]
+        return result
+
     try:
         import aiohttp as _aiohttp
         # Per-request timeouts so a slow STS endpoint cannot starve the activity POST.
@@ -231,22 +251,46 @@ async def _standalone_send(
             access_token = token_payload.get("access_token")
             if not access_token:
                 return send_error("Teams standalone send: token response missing access_token", nothing_sent=True)
-            async with session.post(
-                activities_url, json={"type": "message", "text": message, "textFormat": "markdown"},
-                headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-                timeout=per_request_timeout,
-            ) as send_resp:
-                if send_resp.status >= 400:
-                    body = await send_resp.text()
-                    return send_error(f"Teams standalone send: activity post failed ({send_resp.status}): {body[:300]}")
-                send_payload = await send_resp.json()
+            activity = {"type": "message", "text": message, "textFormat": "markdown"}
+            if ids:
+                async with session.get(
+                    f"{service_url}v3/conversations/{chat_id}/members",
+                    headers={"Authorization": f"Bearer {access_token}"}, timeout=per_request_timeout,
+                ) as members_resp:
+                    if members_resp.status != 200:
+                        return send_error(f"Teams member lookup failed ({members_resp.status}); nothing sent", nothing_sent=True)
+                    members = await members_resp.json()
+                try:
+                    activity = mention_activity(message, ids, members)
+                except ValueError as e:
+                    return send_error(str(e), nothing_sent=True)
+            for chunk in activity_chunks(activity) if ids else [activity]:
+                activity_started = True
+                async with session.post(
+                    activities_url, json=chunk,
+                    headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                    timeout=per_request_timeout,
+                ) as send_resp:
+                    if send_resp.status >= 400:
+                        body = await send_resp.text()
+                        return activity_error(f"Teams standalone send: activity post failed ({send_resp.status}): {body[:300]}")
+                    send_payload = await send_resp.json()
+                    if ids and not send_payload.get("id"):
+                        return activity_error("Teams activity response has no message ID; delivery unknown, do not retry")
+                    sent_any = True
+                    if send_payload.get("id"):
+                        sent_ids.append(send_payload["id"])
+        if ids:
+            return {"success": True, "message_id": sent_ids[0], "message_ids": sent_ids,
+                    "mention_message_id": sent_ids[0]}
         return {"success": True, "message_id": send_payload.get("id")}
     except asyncio.CancelledError:
         raise
     except Exception as e:
         logger.debug("Teams standalone send raised", exc_info=not (shown := describe_proxy_error(e, env_proxy_for_redaction(token_url, activities_url, trust_env=gateway_trust_env()))))
         # the text may echo the proxy URL
-        return send_error(f"Teams standalone send failed: {shown or e}", nothing_sent=request_never_left(e))
+        return activity_error(f"Teams standalone send failed: {shown or e}",
+                              nothing_sent=not activity_started or (not sent_any and request_never_left(e)))
 
 
 # SDK module → names rebound into this module's globals by check_teams_requirements().
@@ -876,6 +920,7 @@ def register(ctx) -> None:
         env_enablement_fn=_env_enablement,  # env-only setups show up in gateway status
         cron_deliver_env_var="TEAMS_HOME_CHANNEL",  # deliver=teams cron home-channel routing
         standalone_sender_fn=_standalone_send,  # out-of-process cron delivery via Bot Framework REST
+        standalone_send=StandaloneSendPolicy(mentions=True),
         allowed_users_env="TEAMS_ALLOWED_USERS", allow_all_env="TEAMS_ALLOW_ALL_USERS",
         max_message_length=28000,  # Teams supports up to ~28 KB per message
         emoji="💼", allow_update_command=True,

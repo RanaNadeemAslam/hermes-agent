@@ -212,11 +212,14 @@ def _handle_send(args):
 
     try:
         from model_tools import _run_async
-        # Only custom plugin handlers receive the complete typed request. ``mentions`` is only for platforms
-        # whose StandaloneSendPolicy declares it (WhatsApp; the CLI rejects it elsewhere); other platforms'
-        # standalone senders don't accept the kwarg.
+        # Only custom plugin handlers receive the complete typed request. Forward ``mentions``
+        # only to plugins whose StandaloneSendPolicy advertises native mention support.
         handler_args = {"args": args} if entry is not None and entry.send_message_handler is not None else {}
         mentions = args.get("mentions")
+        if (mentions and entry is not None and entry.standalone_send is not None
+                and entry.standalone_send.mentions and not entry.standalone_send.media
+                and (media_files or media_dropped)):
+            return tool_error("This platform does not support native mentions with attachments; nothing sent.")
         if mentions and entry is not None and entry.standalone_send is not None and entry.standalone_send.mentions:
             handler_args["mentions"] = [mentions] if isinstance(mentions, str) else list(mentions)
         result = _run_async(_send_to_platform(platform, pconfig, chat_id, cleaned_message, thread_id=thread_id,
@@ -621,12 +624,24 @@ async def _send_plugin_standalone(platform_name, pconfig, chat_id, message, chun
         if as_file is not None:
             return as_file
 
-    def send_one(chunk, is_last):
+    mention_message_id = None
+    delivered_ids = []
+
+    async def send_one(chunk, is_last):
+        nonlocal mention_message_id
+        assert sender is not None  # _plugin_standalone_sender already passed its error check.
         kwargs = {**extra, **first_only}
         first_only.clear()
-        return sender(pconfig, chat_id, chunk, thread_id=thread_id,
-                      media_files=media_files if is_last else empty_media, **kwargs)
-    return await _send_chunks(chunks, send_one)
+        result = await sender(pconfig, chat_id, chunk, thread_id=thread_id,
+                              media_files=media_files if is_last else empty_media, **kwargs)
+        if isinstance(result, dict):
+            mention_message_id = mention_message_id or result.get("mention_message_id")
+            delivered_ids.extend(result.get("message_ids") or ([result["message_id"]] if result.get("message_id") else []))
+        return result
+    result = await _send_chunks(chunks, send_one)
+    if mention_message_id and isinstance(result, dict):
+        result = {**result, "mention_message_id": mention_message_id, "message_ids": delivered_ids}
+    return result
 
 
 async def _send_reply_file_standalone(sender, pconfig, chat_id, message, thread_id, extra):
